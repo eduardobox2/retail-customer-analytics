@@ -1,161 +1,257 @@
-import streamlit as st
+import re
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
+import streamlit as st
 
-# ==========================================
-# 1. CONFIGURACIÓN DE PÁGINA
-# ==========================================
-st.set_page_config(page_title="Retail Dashboard", page_icon="🛍️", layout="wide", initial_sidebar_state="expanded")
+# ======================================================
+# CONFIGURACIÓN
+# ======================================================
+st.set_page_config(page_title="Clientes y ventas cruzadas | Retail", page_icon="🛍️", layout="wide")
 
-# Inyección de CSS Extremo para igualar la imagen de referencia
 st.markdown("""
 <style>
-    /* Fondo principal gris/menta claro */
-    .stApp {
-        background-color: #e6f0ee;
-    }
-    
-    /* Ocultar elementos nativos de Streamlit para limpiar la interfaz */
-    header {visibility: hidden;}
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    
-    /* Estilizar la barra lateral (Sidebar oscura) */
-    [data-testid="stSidebar"] {
-        background-color: #272733 !important;
-    }
-    [data-testid="stSidebar"] * {
-        color: #ffffff !important;
-    }
-    
-    /* Espaciado general */
-    .block-container {
-        padding-top: 1rem;
-        padding-bottom: 0rem;
-    }
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+html, body, [class*="css"], .stApp { font-family: 'IBM Plex Sans', sans-serif; }
+.stApp { background: #f6f7f9; }
+header, footer, #MainMenu { visibility: hidden; }
+.block-container { padding-top: 1.5rem; max-width: 1250px; }
+h1, h2, h3 { color: #1b2430; letter-spacing: -0.01em; }
+[data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid #e3e6ea; }
+[data-testid="stMetric"] { background: #ffffff; border: 1px solid #e3e6ea; border-radius: 8px; padding: 14px 16px; }
+[data-testid="stMetricValue"] { color: #1b2430; font-weight: 600; }
+.insight { background: #ffffff; border-left: 4px solid #1f6f8b; padding: 12px 16px; border-radius: 4px; color: #1b2430; margin: 8px 0 16px 0; }
 </style>
 """, unsafe_allow_html=True)
 
-# Variable global para mantener el orden en los gráficos y tablas
-orden_segmentos = ['Campeones', 'Leales', 'Nuevos / Prometedores', 'Regulares', 'En Riesgo', 'Perdidos / Hibernando']
+# El mismo color para el mismo segmento en todos los gráficos
+ORDEN = ['Campeones', 'Leales', 'Nuevos / Prometedores', 'Regulares', 'En Riesgo', 'Perdidos / Hibernando']
+COLORES = {
+    'Campeones': '#1b7f5c', 'Leales': '#6fb98f', 'Nuevos / Prometedores': '#3b82c4',
+    'Regulares': '#e0b43c', 'En Riesgo': '#e07b39', 'Perdidos / Hibernando': '#c0392b',
+}
+ACCIONES = pd.DataFrame([
+    ['Campeones', 'Programa VIP y acceso anticipado a novedades', 'Retener y subir recompra'],
+    ['Leales', 'Venta cruzada con los combos de la pestaña Canasta', 'Aumentar ticket'],
+    ['Nuevos / Prometedores', 'Bienvenida y incentivo para la segunda compra', 'Convertir en leales'],
+    ['Regulares', 'Promociones por temporada y recordatorios', 'Aumentar frecuencia'],
+    ['En Riesgo', 'Descuento de reactivación, priorizando a los de mayor gasto', 'Recuperar antes de perderlos'],
+    ['Perdidos / Hibernando', 'Campaña de bajo costo; si no responden, dejar de invertir', 'Evitar gasto inútil'],
+], columns=['Segmento', 'Acción recomendada', 'Objetivo'])
 
-# Paleta basada en la imagen: Oscuro, Salmón, Menta/Verde
-C_DARK = '#272733'
-C_SALMON = '#ff8a71'
-C_GREEN = '#98e58f'
 
-# ==========================================
-# 2. CARGA Y PREPARACIÓN DE DATOS
-# ==========================================
+def libras(x):
+    return f"£{x:,.0f}"
+
+
+# ======================================================
+# DATOS
+# ======================================================
 @st.cache_data
-def load_data():
+def cargar():
     rfm = pd.read_csv("data/processed/rfm_clusters.csv")
-    rules = pd.read_csv("data/processed/reglas_asociacion.csv")
-    
-    nombres_clusters = {
-        0: 'Perdidos (C0)', 1: 'Ocasionales (C1)', 2: 'VIPs (C2)', 3: 'En Riesgo (C3)'
-    }
-    rfm['Nombre_Cluster'] = rfm['Cluster'].map(nombres_clusters)
-    rfm['Segmento_Negocio'] = pd.Categorical(rfm['Segmento_Negocio'], categories=orden_segmentos, ordered=True)
-    return rfm, rules
+    reglas = pd.read_csv("data/processed/reglas_asociacion.csv")
+
+    rfm['Segmento_Negocio'] = pd.Categorical(rfm['Segmento_Negocio'], categories=ORDEN, ordered=True)
+
+    # Nombra los clusters según su perfil real (no a ojo)
+    perfil = rfm.groupby('Cluster')[['Recency', 'Frequency', 'Monetary']].mean()
+    nombres = {c: f"Cluster {c}" for c in perfil.index}
+    if len(perfil) == 4:
+        vip = perfil['Monetary'].idxmax()
+        resto = perfil.drop(vip)
+        perdidos = resto['Recency'].idxmax()
+        resto = resto.drop(perdidos)
+        activos = resto['Recency'].idxmin()
+        riesgo = resto.index.difference([activos])[0]
+        nombres.update({vip: 'VIP', perdidos: 'Perdidos', activos: 'Activos', riesgo: 'Ocasionales'})
+    rfm['Grupo_KMeans'] = rfm['Cluster'].map(nombres)
+
+    # Limpia los conjuntos de productos si vienen como "frozenset({'A'})"
+    for col in ['antecedents', 'consequents']:
+        if col in reglas.columns:
+            reglas[col] = reglas[col].astype(str).apply(
+                lambda s: ", ".join(re.findall(r"'([^']*)'", s)) or s)
+    return rfm, reglas
+
 
 try:
-    rfm, rules = load_data()
+    rfm, reglas = cargar()
 except FileNotFoundError:
-    st.error("❌ Archivos no encontrados.")
+    st.error("No encuentro los archivos en data/processed/. Ejecuta primero los notebooks o scripts del proyecto.")
     st.stop()
 
-# ==========================================
-# 3. BARRA LATERAL (Imitando menú izquierdo)
-# ==========================================
+# ======================================================
+# FILTROS
+# ======================================================
 with st.sidebar:
-    st.markdown("<h2 style='text-align: center; letter-spacing: 2px;'>L O G O T Y P E</h2><br>", unsafe_allow_html=True)
-    st.markdown("### ⚙️ FILTROS")
-    
-    segmentos_seleccionados = st.multiselect(
-        "Segmentos:", options=rfm['Segmento_Negocio'].cat.categories, default=rfm['Segmento_Negocio'].cat.categories
-    )
-    
-    rfm_filt = rfm[rfm['Segmento_Negocio'].isin(segmentos_seleccionados)]
-    
-    st.markdown("<br><br><br><br><br>", unsafe_allow_html=True)
-    st.markdown("<p style='font-size: 0.8rem; color: #888;'>Desarrollado en Python</p>", unsafe_allow_html=True)
+    st.header("Filtros")
+    segs = st.multiselect("Segmentos", ORDEN, default=ORDEN)
+    rec_max = int(rfm['Recency'].max())
+    rec = st.slider("Días desde la última compra", 0, rec_max, (0, rec_max))
+    gasto_max = int(rfm['Monetary'].quantile(0.99))
+    gasto = st.slider("Gasto total del cliente (£)", 0, gasto_max, (0, gasto_max),
+                      help="Se corta en el percentil 99 para ignorar casos extremos.")
+    st.caption("Los filtros se aplican a las pestañas de Resumen, Segmentos y Grupos K-Means.")
 
-# Cálculos KPIs
-ingresos_totales = rfm_filt['Monetary'].sum()
-clientes_activos = len(rfm_filt)
-ticket_promedio = ingresos_totales / rfm_filt['Frequency'].sum() if rfm_filt['Frequency'].sum() > 0 else 0
-campeones = len(rfm_filt[rfm_filt['Segmento_Negocio'] == 'Campeones'])
+df = rfm[
+    rfm['Segmento_Negocio'].isin(segs)
+    & rfm['Recency'].between(*rec)
+    & ((rfm['Monetary'] <= gasto[1]) | (gasto[1] == gasto_max))
+    & (rfm['Monetary'] >= gasto[0])
+]
+if df.empty:
+    st.warning("Con estos filtros no queda ningún cliente. Amplía los rangos.")
+    st.stop()
 
-# ==========================================
-# 4. FUNCIÓN PARA TARJETAS ESTILO UI (Header negro, Cuerpo blanco)
-# ==========================================
-def draw_kpi_card(title, value, sub_text, sub_color):
-    html = f"""
-    <div style="background: white; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); margin-bottom: 20px; overflow: hidden; font-family: sans-serif;">
-        <div style="background: #272733; color: white; padding: 8px 15px; font-size: 0.85rem; font-weight: 600; letter-spacing: 1px;">
-            {title.upper()}
-        </div>
-        <div style="padding: 15px;">
-            <div style="font-size: 2rem; font-weight: 700; color: #272733; margin-bottom: 5px;">{value}</div>
-            <div style="font-size: 0.75rem; font-weight: 600; color: {sub_color};">{sub_text}</div>
-        </div>
-    </div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
+# ======================================================
+# ENCABEZADO
+# ======================================================
+st.title("Quiénes son mis mejores clientes y qué venderles")
+st.caption("Tienda online del Reino Unido, 2009 a 2011. Segmentación RFM, K-Means y análisis de canasta.")
 
-# ==========================================
-# 5. ESTRUCTURA DEL DASHBOARD (HEADER Y KPIS)
-# ==========================================
-st.markdown(f"<h3 style='color: {C_DARK};'>HOME <span style='font-size: 1rem; font-weight: normal;'> 🏠 DASHBOARD</span></h3>", unsafe_allow_html=True)
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Resumen", "Segmentos", "Grupos K-Means", "Canasta de compras", "Qué hacer"])
 
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    draw_kpi_card("Clientes Activos", f"{clientes_activos:,}", "+5% SINCE LAST MONTH", C_GREEN)
-with c2:
-    draw_kpi_card("Campeones (VIP)", f"{campeones:,}", "+4.54% SINCE LAST MONTH", C_SALMON)
-with c3:
-    draw_kpi_card("Ticket Promedio", f"£{ticket_promedio:,.2f}", "+2.54% SINCE LAST MONTH", C_GREEN)
-with c4:
-    draw_kpi_card("Ingresos (Sales)", f"£{ingresos_totales:,.0f}", "+6.54% SINCE LAST MONTH", C_GREEN)
+# ======================================================
+# 1. RESUMEN
+# ======================================================
+with tab1:
+    ingresos = df['Monetary'].sum()
+    pedidos = df['Frequency'].sum()
+    top20 = df.nlargest(max(1, int(len(df) * 0.2)), 'Monetary')['Monetary'].sum()
+    riesgo = df['Segmento_Negocio'].isin(['En Riesgo', 'Perdidos / Hibernando']).mean()
 
-# ==========================================
-# 6. GRÁFICOS (Imitando fondo verde y diseño de líneas)
-# ==========================================
-# Fila central: Líneas
-st.markdown(f"""
-    <div style="background: white; padding: 15px; border-radius: 6px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); margin-bottom: 20px;">
-        <h5 style="color: {C_DARK}; font-size: 0.9rem; margin-top: 0;">PERCENTAGE (Gasto Promedio por Segmento)</h5>
-    </div>
-""", unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Clientes", f"{len(df):,}")
+    c2.metric("Ingresos", libras(ingresos))
+    c3.metric("Ticket promedio por pedido", f"£{ingresos / pedidos:,.2f}")
+    c4.metric("Clientes en riesgo o perdidos", f"{riesgo:.0%}")
 
-# Gráfico de líneas
-df_line = rfm_filt.groupby('Segmento_Negocio', observed=True)['Monetary'].mean().reset_index()
-fig_line = px.line(df_line, x='Segmento_Negocio', y='Monetary', markers=True)
-fig_line.update_traces(line_color=C_DARK, marker=dict(size=10, color=C_SALMON, line=dict(width=2, color='white')))
-fig_line.update_layout(
-    height=250, margin=dict(l=20, r=20, t=10, b=20),
-    plot_bgcolor='white', paper_bgcolor='white',
-    xaxis=dict(showgrid=False, title=""), yaxis=dict(showgrid=True, gridcolor='#f0f0f0', title="")
-)
-st.plotly_chart(fig_line, use_container_width=True)
+    st.markdown(
+        f"<div class='insight'>El 20% de clientes que más gasta genera el "
+        f"<b>{top20 / ingresos:.0%}</b> de los ingresos. Cuidar a ese grupo es la prioridad.</div>",
+        unsafe_allow_html=True)
 
-# Fila inferior: Gráfico de Barras con fondo verde (Imitando "TOTAL ORDERS")
-st.markdown(f"""
-    <div style="background: {C_DARK}; color: white; padding: 8px 15px; font-size: 0.85rem; font-weight: 600; border-radius: 6px 6px 0 0;">
-        TOTAL ORDERS (Distribución de Clientes)
-    </div>
-""", unsafe_allow_html=True)
+    res = df.groupby('Segmento_Negocio', observed=True).agg(
+        Clientes=('Monetary', 'size'), Ingresos=('Monetary', 'sum')).reset_index()
+    res['% de clientes'] = res['Clientes'] / res['Clientes'].sum() * 100
+    res['% de ingresos'] = res['Ingresos'] / res['Ingresos'].sum() * 100
+    largo = res.melt(id_vars='Segmento_Negocio', value_vars=['% de clientes', '% de ingresos'],
+                     var_name='Medida', value_name='Porcentaje')
+    fig = px.bar(largo, y='Segmento_Negocio', x='Porcentaje', color='Medida', barmode='group',
+                 orientation='h', category_orders={'Segmento_Negocio': ORDEN[::-1]},
+                 color_discrete_map={'% de clientes': '#b8c2cc', '% de ingresos': '#1f6f8b'},
+                 title="Cuántos clientes hay en cada segmento frente a cuánto ingreso aportan")
+    fig.update_layout(height=420, plot_bgcolor='white', paper_bgcolor='#f6f7f9',
+                      yaxis_title="", xaxis_title="Porcentaje del total", legend_title="")
+    st.plotly_chart(fig, use_container_width=True)
 
-df_bar = rfm_filt['Segmento_Negocio'].value_counts().reset_index()
-df_bar.columns = ['Segmento', 'Cantidad']
-fig_bar = px.bar(df_bar, x='Segmento', y='Cantidad')
-fig_bar.update_traces(marker_color=C_DARK, width=0.3)
-fig_bar.update_layout(
-    height=300, margin=dict(l=20, r=20, t=20, b=20),
-    plot_bgcolor=C_GREEN, paper_bgcolor=C_GREEN,  # Fondo verde de la imagen
-    xaxis=dict(showgrid=False, title="", tickfont=dict(color='white')), 
-    yaxis=dict(showgrid=False, title="", tickfont=dict(color='white'))
-)
-st.plotly_chart(fig_bar, use_container_width=True)
+# ======================================================
+# 2. SEGMENTOS
+# ======================================================
+with tab2:
+    st.subheader("Perfil de cada segmento")
+    perfil = df.groupby('Segmento_Negocio', observed=True).agg(
+        Clientes=('Monetary', 'size'),
+        Dias_desde_ultima_compra=('Recency', 'mean'),
+        Compras=('Frequency', 'mean'),
+        Gasto_medio=('Monetary', 'mean'),
+        Ingresos=('Monetary', 'sum')).round(1).reset_index()
+    perfil['% de ingresos'] = (perfil['Ingresos'] / perfil['Ingresos'].sum() * 100).round(1)
+    st.dataframe(perfil.rename(columns={
+        'Segmento_Negocio': 'Segmento', 'Dias_desde_ultima_compra': 'Días desde última compra',
+        'Compras': 'Compras (promedio)', 'Gasto_medio': 'Gasto medio (£)', 'Ingresos': 'Ingresos (£)'}),
+        use_container_width=True, hide_index=True)
+
+    fig = px.box(df, x='Segmento_Negocio', y='Monetary', color='Segmento_Negocio', log_y=True,
+                 color_discrete_map=COLORES, category_orders={'Segmento_Negocio': ORDEN},
+                 title="Gasto por cliente en cada segmento (escala logarítmica)")
+    fig.update_layout(height=420, showlegend=False, plot_bgcolor='white', paper_bgcolor='#f6f7f9',
+                      xaxis_title="", yaxis_title="Gasto total (£)")
+    st.plotly_chart(fig, use_container_width=True)
+
+# ======================================================
+# 3. GRUPOS K-MEANS
+# ======================================================
+with tab3:
+    st.subheader("Los grupos que encontró el algoritmo")
+    muestra = df.sample(min(len(df), 3000), random_state=1)
+    fig = px.scatter(muestra, x='Recency', y='Monetary', color='Grupo_KMeans', log_y=True, opacity=0.5,
+                     hover_data=['Frequency', 'Segmento_Negocio'],
+                     title="Cada punto es un cliente (muestra de hasta 3,000)")
+    fig.update_layout(height=450, plot_bgcolor='white', paper_bgcolor='#f6f7f9',
+                      xaxis_title="Días desde la última compra", yaxis_title="Gasto total (£, escala log)",
+                      legend_title="Grupo")
+    st.plotly_chart(fig, use_container_width=True)
+
+    cruce = pd.crosstab(df['Segmento_Negocio'], df['Grupo_KMeans'], normalize='index').mul(100).round(0)
+    fig2 = px.imshow(cruce, text_auto=True, aspect='auto', color_continuous_scale='Blues',
+                     title="Qué porcentaje de cada segmento cae en cada grupo K-Means")
+    fig2.update_layout(height=400, paper_bgcolor='#f6f7f9', xaxis_title="Grupo K-Means",
+                       yaxis_title="", coloraxis_showscale=False)
+    st.plotly_chart(fig2, use_container_width=True)
+    st.caption("Si cada fila se concentra en un solo grupo, las reglas de negocio y el algoritmo coinciden.")
+
+# ======================================================
+# 4. CANASTA
+# ======================================================
+with tab4:
+    st.subheader("Qué productos se compran juntos")
+    cols = {c.lower(): c for c in reglas.columns}
+    necesarias = ['antecedents', 'consequents', 'support', 'confidence', 'lift']
+    if not all(n in cols for n in necesarias):
+        st.warning("El archivo de reglas debe tener las columnas: " + ", ".join(necesarias))
+    else:
+        r = reglas.rename(columns={cols[n]: n for n in necesarias})
+        a, b = st.columns(2)
+        lift_min = a.slider("Lift mínimo", 1.0, float(max(r['lift'].max(), 2.0)), 3.0, 0.5,
+                            help="Cuántas veces más probable es la compra conjunta que por azar.")
+        conf_min = b.slider("Confianza mínima", 0.0, 1.0, 0.5, 0.05,
+                            help="De los que compran A, qué proporción también compra B.")
+        f = r[(r['lift'] >= lift_min) & (r['confidence'] >= conf_min)].sort_values('lift', ascending=False)
+        st.write(f"**{len(f):,}** reglas cumplen los criterios.")
+        if len(f):
+            fig = px.scatter(f.head(500), x='support', y='confidence', color='lift', size='lift',
+                             hover_data=['antecedents', 'consequents'], color_continuous_scale='Teal',
+                             title="Soporte y confianza de cada regla (el color indica el lift)")
+            fig.update_layout(height=400, plot_bgcolor='white', paper_bgcolor='#f6f7f9',
+                              xaxis_title="Soporte (frecuencia de la pareja)", yaxis_title="Confianza")
+            st.plotly_chart(fig, use_container_width=True)
+
+            f = f.assign(Regla=f['antecedents'] + "  →  " + f['consequents'])
+            st.dataframe(
+                f[['Regla', 'support', 'confidence', 'lift']].head(50).rename(columns={
+                    'support': 'Soporte', 'confidence': 'Confianza', 'lift': 'Lift'}).round(3),
+                use_container_width=True, hide_index=True)
+
+            prod = st.selectbox("Busca un producto y mira con qué se vende",
+                                sorted(set(f['antecedents'])))
+            st.dataframe(f[f['antecedents'] == prod][['consequents', 'confidence', 'lift']].head(5)
+                         .rename(columns={'consequents': 'Se compra también', 'confidence': 'Confianza',
+                                          'lift': 'Lift'}).round(3), hide_index=True)
+
+# ======================================================
+# 5. ACCIONES
+# ======================================================
+with tab5:
+    st.subheader("Qué hacer con cada segmento")
+    tabla = ACCIONES.merge(
+        df.groupby('Segmento_Negocio', observed=True)['Monetary'].agg(['size', 'sum']).reset_index()
+          .rename(columns={'Segmento_Negocio': 'Segmento', 'size': 'Clientes', 'sum': 'Ingresos (£)'}),
+        on='Segmento', how='left').fillna(0)
+    tabla['Ingresos (£)'] = tabla['Ingresos (£)'].round(0)
+    st.dataframe(tabla, use_container_width=True, hide_index=True)
+
+    st.markdown("**Estimación de impacto**")
+    tasa = st.slider("Porcentaje de clientes en riesgo que logramos recuperar", 1, 50, 10)
+    er = df[df['Segmento_Negocio'] == 'En Riesgo']
+    if len(er):
+        extra = er['Monetary'].mean() * len(er) * tasa / 100
+        st.markdown(
+            f"<div class='insight'>Si recuperamos el {tasa}% de los {len(er):,} clientes en riesgo, "
+            f"con su gasto medio histórico de {libras(er['Monetary'].mean())}, "
+            f"los ingresos adicionales serían de unos <b>{libras(extra)}</b>. "
+            f"Es una estimación simple: no descuenta el costo de la campaña.</div>",
+            unsafe_allow_html=True)
+    else:
+        st.info("No hay clientes 'En Riesgo' con los filtros actuales.")
