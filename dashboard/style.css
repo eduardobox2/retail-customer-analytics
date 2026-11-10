@@ -1,0 +1,33 @@
+/* Estilos personalizados del dashboard */
+.block-container { padding-top: 1.5rem; max-width: 1400px; }
+
+.hero {
+    background: linear-gradient(120deg, #6C5CE7 0%, #00CEC9 100%);
+    padding: 1.6rem 2rem; border-radius: 18px; margin-bottom: 1.2rem;
+    box-shadow: 0 8px 30px rgba(108, 92, 231, 0.35);
+}
+.hero h1 { color: white; margin: 0; font-size: 2rem; font-weight: 800; }
+.hero p { color: rgba(255, 255, 255, 0.9); margin: 0.3rem 0 0 0; font-size: 1.05rem; }
+
+.kpi {
+    background: #1A1D29; border: 1px solid #2A2E3F; border-left: 5px solid var(--accent, #6C5CE7);
+    border-radius: 14px; padding: 1rem 1.2rem; height: 100%;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.kpi:hover { transform: translateY(-3px); box-shadow: 0 8px 22px rgba(0, 0, 0, 0.4); }
+.kpi .label { color: #9AA0B4; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.kpi .value { color: #FFFFFF; font-size: 1.9rem; font-weight: 800; line-height: 1.2; }
+.kpi .sub { color: #9AA0B4; font-size: 0.8rem; }
+
+.insight {
+    background: rgba(108, 92, 231, 0.12); border: 1px solid rgba(108, 92, 231, 0.4);
+    border-radius: 12px; padding: 0.9rem 1.1rem; margin: 0.4rem 0 1rem 0; color: #E8EAF0;
+}
+
+.stTabs [data-baseweb="tab-list"] { gap: 8px; }
+.stTabs [data-baseweb="tab"] {
+    background: #1A1D29; border-radius: 10px 10px 0 0; padding: 0.6rem 1.2rem; font-weight: 600;
+}
+.stTabs [aria-selected="true"] { background: #6C5CE7 !important; color: white !important; }
+
+[data-testid="stSidebar"] { border-right: 1px solid #2A2E3F; }

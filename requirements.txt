@@ -1,6 +1,13 @@
 pandas
+numpy
 sqlalchemy
 scikit-learn
 mlxtend
 streamlit
 plotly
+openpyxl
+jupyter
+ipykernel
+nbformat
+nbconvert
+kaleido
